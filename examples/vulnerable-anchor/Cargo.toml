@@ -1,0 +1,9 @@
+[package]
+name = "sentinel-vault"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anchor-lang = "0.31"
+solana-program = "2"
+

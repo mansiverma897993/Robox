@@ -1,0 +1,16 @@
+[package]
+name = "robox-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "robox"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+robox-core = { path = "../robox-core" }
+robox-report = { path = "../robox-report" }
+
