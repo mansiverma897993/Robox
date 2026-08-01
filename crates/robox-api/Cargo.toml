@@ -1,0 +1,21 @@
+[package]
+name = "robox-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+robox-core = { path = "../robox-core" }
+robox-report = { path = "../robox-report" }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+

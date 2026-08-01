@@ -1,0 +1,13 @@
+/target
+**/node_modules
+**/.next
+**/dist
+**/.wrangler
+.edge-profile/
+.npm-cache/
+.tmp/
+.tools/
+.env
+.env.local
+*.log
+reports/

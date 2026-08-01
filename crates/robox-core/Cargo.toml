@@ -1,0 +1,18 @@
+[package]
+name = "robox-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+quote.workspace = true
+regex.workspace = true
+serde.workspace = true
+syn.workspace = true
+thiserror.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
