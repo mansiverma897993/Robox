@@ -1,3 +1,13 @@
+![Robox — Audit Solana smart Contract](docs/assets/robox-banner.png)
+
+# Audit Solana smart Contract
+
+## Introduction
+
+Robox is a Rust-native security auditor for Solana programs. Point it at an Anchor or native Solana project — a local folder, browser-uploaded source files, or a public GitHub repository — and it parses the Rust source, classifies the program, runs deterministic security rules, and maps how instructions, accounts, PDAs, CPIs, and token flows relate to each other. Every finding is explainable and pinned to an exact code location, so you can review it like an auditor would rather than trusting an opaque score.
+
+You can use it three ways: a web dashboard for interactive review, a CLI for local scans and CI gates, and a REST/WebSocket API for integration. Audit results export as terminal output, detailed PDF, JSON, Markdown, or SARIF 2.1.0, so the same scan can feed a human review, a report handed to a team, or a GitHub code-scanning pipeline.
+
 # Robox
 
 Robox is a Rust-native security analysis foundation for Solana and Anchor programs. It scans local projects, browser-uploaded source files, and public GitHub repositories; returns explainable findings with exact code locations; and exports terminal, detailed PDF, JSON, Markdown, and SARIF 2.1.0 reports. The dashboard starts empty and never displays a score or finding until an imported project has completed a live scan.
