@@ -1,6 +1,8 @@
 /target
 **/node_modules
 **/.next
+**/test-results
+**/playwright-report
 **/dist
 **/.wrangler
 .edge-profile/
@@ -11,3 +13,5 @@
 .env.local
 *.log
 reports/
+/output/
+/tmp/

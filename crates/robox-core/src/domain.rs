@@ -14,6 +14,34 @@ pub struct SourceFile {
     pub content: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectKind {
+    Anchor,
+    SolanaProgram,
+    RustCrate,
+}
+
+impl ProjectKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Anchor => "Anchor program",
+            Self::SolanaProgram => "Native Solana program",
+            Self::RustCrate => "Rust crate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectProfile {
+    pub kind: ProjectKind,
+    pub frameworks: Vec<String>,
+    pub program_ids: Vec<String>,
+    pub manifests: Vec<String>,
+    pub has_anchor_workspace: bool,
+    pub has_solana_dependency: bool,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -83,6 +111,12 @@ pub struct ProjectMetrics {
     pub pda_constraints: usize,
     pub cpi_calls: usize,
     pub dependencies: usize,
+    pub instructions: usize,
+    pub programs: usize,
+    pub signer_accounts: usize,
+    pub unchecked_accounts: usize,
+    pub token_accounts: usize,
+    pub sysvar_reads: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +144,8 @@ pub struct ProjectGraph {
 pub struct ScanResult {
     pub id: String,
     pub project: String,
+    pub project_kind: ProjectKind,
+    pub profile: ProjectProfile,
     pub engine_version: String,
     pub started_at: DateTime<Utc>,
     pub completed_at: DateTime<Utc>,

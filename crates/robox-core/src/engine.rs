@@ -1,10 +1,10 @@
 use crate::{
-    GraphEdge, GraphNode, ProjectGraph, ProjectMetrics, RuleContext, RuleRegistry, ScanResult,
-    ScanSource, SourceFile,
+    GraphEdge, GraphNode, ProjectGraph, ProjectKind, ProjectMetrics, ProjectProfile, RuleContext,
+    RuleRegistry, ScanResult, ScanSource, SourceFile,
 };
 use chrono::Utc;
 use quote::ToTokens;
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashSet, hash_map::DefaultHasher};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
@@ -50,26 +50,40 @@ impl ScanEngine {
         let project = project.into();
         let files = match source {
             ScanSource::Directory(path) => load_directory(&path)?,
-            ScanSource::Inline(files) => files
-                .into_iter()
-                .filter(|file| file.path.ends_with(".rs") || file.path.ends_with("Cargo.toml"))
-                .collect(),
+            ScanSource::Inline(files) => files.into_iter().filter(is_supported_source).collect(),
         };
         if !files.iter().any(|file| file.path.ends_with(".rs")) {
             return Err(EngineError::NoRustFiles);
         }
 
+        let profile = detect_profile(&files);
         let mut findings = Vec::new();
         let mut metrics = ProjectMetrics::default();
+        let project_node = format!("project:{project}");
         let mut graph = ProjectGraph {
-            level: "AST-derived project relationship graph (MVP)".into(),
-            ..Default::default()
+            level: "AST and Anchor account relationship graph".into(),
+            nodes: vec![GraphNode {
+                id: project_node.clone(),
+                label: project.clone(),
+                kind: match profile.kind {
+                    ProjectKind::Anchor => "anchor_program",
+                    ProjectKind::SolanaProgram => "solana_program",
+                    ProjectKind::RustCrate => "rust_crate",
+                }
+                .into(),
+            }],
+            edges: Vec::new(),
         };
+
         for file in &files {
             if file.path.ends_with("Cargo.toml") {
                 metrics.dependencies += dependency_count(&file.content);
                 continue;
             }
+            if !file.path.ends_with(".rs") {
+                continue;
+            }
+
             metrics.rust_files += 1;
             metrics.lines_of_code += file
                 .content
@@ -79,11 +93,19 @@ impl ScanEngine {
             metrics.pda_constraints += file.content.matches("seeds =").count();
             metrics.cpi_calls += file.content.matches("invoke(").count()
                 + file.content.matches("invoke_signed(").count();
+            metrics.signer_accounts += file.content.matches("Signer<'info>").count();
+            metrics.unchecked_accounts += file.content.matches("UncheckedAccount<'info>").count()
+                + file.content.matches("AccountInfo<'info>").count();
+            metrics.token_accounts += file.content.matches("TokenAccount").count();
+            metrics.sysvar_reads += file.content.matches("Clock::get()").count()
+                + file.content.matches("Rent::get()").count();
+
             let syntax = syn::parse_file(&file.content).ok();
             if let Some(ast) = syntax.as_ref() {
                 metrics.parsed_files += 1;
-                collect_ast(ast, &file.path, &mut metrics, &mut graph);
+                collect_ast(ast, &file.path, &project_node, &mut metrics, &mut graph);
             }
+            collect_solana_relationships(file, &mut graph);
             findings.extend(self.registry.analyze(&RuleContext {
                 path: &file.path,
                 source: &file.content,
@@ -100,11 +122,30 @@ impl ScanEngine {
         let completed_at = Utc::now();
         let mut hasher = DefaultHasher::new();
         (project.as_str(), started_at.timestamp_nanos_opt()).hash(&mut hasher);
+
         Ok(ScanResult {
-            id: format!("scan_{:x}", hasher.finish()), project, engine_version: env!("CARGO_PKG_VERSION").into(), started_at, completed_at, security_score, findings, metrics, graph,
-            limitations: vec!["CFG/DFG and symbolic execution are extension points, not implemented analyses in this MVP.".into(), "Rules identify review candidates and do not replace a manual security audit.".into(), "AI-assisted reasoning is not enabled until an explicit provider adapter is configured.".into()],
+            id: format!("scan_{:x}", hasher.finish()),
+            project,
+            project_kind: profile.kind,
+            profile,
+            engine_version: env!("CARGO_PKG_VERSION").into(),
+            started_at,
+            completed_at,
+            security_score,
+            findings,
+            metrics,
+            graph,
+            limitations: vec![
+                "AST, Anchor constraints, CPI sites, PDAs, token accounts, and project manifests are analyzed; compiler CFG/DFG is not yet implemented.".into(),
+                "Rules identify review candidates and do not replace a manual Solana security audit.".into(),
+                "AI-assisted reasoning remains an explicit extension and cannot silently alter deterministic findings.".into(),
+            ],
         })
     }
+}
+
+fn is_supported_source(file: &SourceFile) -> bool {
+    file.path.ends_with(".rs") || file.path.ends_with(".toml")
 }
 
 fn load_directory(root: &Path) -> Result<Vec<SourceFile>, EngineError> {
@@ -118,15 +159,16 @@ fn load_directory(root: &Path) -> Result<Vec<SourceFile>, EngineError> {
         .filter_entry(|entry| {
             !matches!(
                 entry.file_name().to_str(),
-                Some("target" | "node_modules" | ".git")
+                Some("target" | "node_modules" | ".git" | ".next" | ".anchor")
             )
         })
         .filter_map(Result::ok)
     {
         let path = entry.path();
         if !path.is_file()
-            || !(path.extension().is_some_and(|ext| ext == "rs")
-                || path.file_name().is_some_and(|name| name == "Cargo.toml"))
+            || !(path
+                .extension()
+                .is_some_and(|ext| ext == "rs" || ext == "toml"))
         {
             continue;
         }
@@ -145,6 +187,82 @@ fn load_directory(root: &Path) -> Result<Vec<SourceFile>, EngineError> {
         });
     }
     Ok(files)
+}
+
+fn detect_profile(files: &[SourceFile]) -> ProjectProfile {
+    let combined = files
+        .iter()
+        .map(|file| file.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let has_anchor_workspace = files.iter().any(|file| file.path.ends_with("Anchor.toml"));
+    let has_anchor_dependency = combined.contains("anchor-lang")
+        || combined.contains("anchor_lang")
+        || combined.contains("#[program]");
+    let has_solana_dependency = combined.contains("solana-program")
+        || combined.contains("solana_program")
+        || combined.contains("entrypoint!");
+    let kind = if has_anchor_workspace || has_anchor_dependency {
+        ProjectKind::Anchor
+    } else if has_solana_dependency {
+        ProjectKind::SolanaProgram
+    } else {
+        ProjectKind::RustCrate
+    };
+
+    let mut frameworks = Vec::new();
+    if has_anchor_workspace || has_anchor_dependency {
+        frameworks.push("Anchor".into());
+    }
+    if has_solana_dependency || matches!(kind, ProjectKind::Anchor) {
+        frameworks.push("Solana Program".into());
+    }
+    if combined.contains("anchor-spl")
+        || combined.contains("anchor_spl")
+        || combined.contains("spl-token")
+    {
+        frameworks.push("SPL Token".into());
+    }
+
+    let manifests = files
+        .iter()
+        .filter(|file| file.path.ends_with(".toml"))
+        .map(|file| file.path.clone())
+        .collect();
+
+    ProjectProfile {
+        kind,
+        frameworks,
+        program_ids: extract_program_ids(files),
+        manifests,
+        has_anchor_workspace,
+        has_solana_dependency,
+    }
+}
+
+fn extract_program_ids(files: &[SourceFile]) -> Vec<String> {
+    let mut ids = HashSet::new();
+    for file in files {
+        for line in file.content.lines() {
+            let trimmed = line.trim();
+            if (trimmed.contains("declare_id!(") || trimmed.contains('='))
+                && let Some(start) = trimmed.find('"')
+                && let Some(end) = trimmed[start + 1..].find('"')
+            {
+                let candidate = &trimmed[start + 1..start + 1 + end];
+                if (32..=44).contains(&candidate.len())
+                    && candidate
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric())
+                {
+                    ids.insert(candidate.to_string());
+                }
+            }
+        }
+    }
+    let mut ids: Vec<_> = ids.into_iter().collect();
+    ids.sort();
+    ids
 }
 
 fn dependency_count(cargo: &str) -> usize {
@@ -168,6 +286,7 @@ fn dependency_count(cargo: &str) -> usize {
 fn collect_ast(
     ast: &syn::File,
     path: &str,
+    project_node: &str,
     metrics: &mut ProjectMetrics,
     graph: &mut ProjectGraph,
 ) {
@@ -177,13 +296,19 @@ fn collect_ast(
         label: path.into(),
         kind: "file".into(),
     });
-    collect_items(&ast.items, path, &file_id, metrics, graph);
+    graph.edges.push(GraphEdge {
+        source: project_node.into(),
+        target: file_id.clone(),
+        relation: "contains".into(),
+    });
+    collect_items(&ast.items, path, &file_id, false, metrics, graph);
 }
 
 fn collect_items(
     items: &[syn::Item],
     path: &str,
     parent: &str,
+    in_program: bool,
     metrics: &mut ProjectMetrics,
     graph: &mut ProjectGraph,
 ) {
@@ -191,30 +316,36 @@ fn collect_items(
         match item {
             syn::Item::Fn(function) => {
                 metrics.functions += 1;
+                if in_program {
+                    metrics.instructions += 1;
+                }
                 let name = function.sig.ident.to_string();
                 let id = format!("fn:{path}:{name}");
                 graph.nodes.push(GraphNode {
                     id: id.clone(),
                     label: name,
-                    kind: "instruction".into(),
+                    kind: if in_program {
+                        "instruction"
+                    } else {
+                        "function"
+                    }
+                    .into(),
                 });
                 graph.edges.push(GraphEdge {
                     source: parent.into(),
                     target: id,
-                    relation: "contains".into(),
+                    relation: if in_program { "exposes" } else { "contains" }.into(),
                 });
             }
             syn::Item::Struct(structure) => {
-                let is_accounts = structure.attrs.iter().any(|attr| {
-                    attr.path()
-                        .segments
-                        .last()
-                        .is_some_and(|segment| segment.ident == "derive")
-                }) && structure
-                    .fields
+                let attributes = structure
+                    .attrs
                     .iter()
-                    .any(|field| field.ty.to_token_stream().to_string().contains("Account"));
-                if is_accounts {
+                    .map(ToTokens::to_token_stream)
+                    .map(|tokens| tokens.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if attributes.contains("Accounts") {
                     metrics.account_structs += 1;
                     let name = structure.ident.to_string();
                     let id = format!("account:{path}:{name}");
@@ -226,17 +357,75 @@ fn collect_items(
                     graph.edges.push(GraphEdge {
                         source: parent.into(),
                         target: id,
-                        relation: "declares".into(),
+                        relation: "validates".into(),
                     });
                 }
             }
             syn::Item::Mod(module) => {
                 if let Some((_, nested)) = &module.content {
-                    collect_items(nested, path, parent, metrics, graph);
+                    let is_program = module
+                        .attrs
+                        .iter()
+                        .any(|attribute| attribute.path().is_ident("program"));
+                    let module_id = if is_program {
+                        metrics.programs += 1;
+                        let id = format!("program:{path}:{}", module.ident);
+                        graph.nodes.push(GraphNode {
+                            id: id.clone(),
+                            label: module.ident.to_string(),
+                            kind: "program".into(),
+                        });
+                        graph.edges.push(GraphEdge {
+                            source: parent.into(),
+                            target: id.clone(),
+                            relation: "declares".into(),
+                        });
+                        id
+                    } else {
+                        parent.to_string()
+                    };
+                    collect_items(
+                        nested,
+                        path,
+                        &module_id,
+                        in_program || is_program,
+                        metrics,
+                        graph,
+                    );
                 }
             }
             _ => {}
         }
+    }
+}
+
+fn collect_solana_relationships(file: &SourceFile, graph: &mut ProjectGraph) {
+    let file_id = format!("file:{}", file.path);
+    for (line_index, line) in file.content.lines().enumerate() {
+        let (kind, relation) = if line.contains("seeds =") {
+            ("pda", "derives")
+        } else if line.contains("invoke(") || line.contains("invoke_signed(") {
+            ("cpi", "invokes")
+        } else if line.contains("TokenAccount") {
+            ("token_account", "uses")
+        } else {
+            continue;
+        };
+        let id = format!("{kind}:{}:{}", file.path, line_index + 1);
+        graph.nodes.push(GraphNode {
+            id: id.clone(),
+            label: match kind {
+                "pda" => format!("PDA · line {}", line_index + 1),
+                "cpi" => format!("CPI · line {}", line_index + 1),
+                _ => format!("Token account · line {}", line_index + 1),
+            },
+            kind: kind.into(),
+        });
+        graph.edges.push(GraphEdge {
+            source: file_id.clone(),
+            target: id,
+            relation: relation.into(),
+        });
     }
 }
 
@@ -255,5 +444,33 @@ mod tests {
             .unwrap();
         assert!(result.findings.iter().any(|f| f.rule_id == "RBX001"));
         assert!(result.findings.iter().any(|f| f.rule_id == "RBX004"));
+    }
+
+    #[test]
+    fn recognizes_anchor_projects_and_instructions() {
+        let result = ScanEngine::default()
+            .scan(
+                "anchor-demo",
+                ScanSource::Inline(vec![
+                    SourceFile {
+                        path: "Anchor.toml".into(),
+                        content: "[programs.localnet]\ndemo = \"11111111111111111111111111111111\""
+                            .into(),
+                    },
+                    SourceFile {
+                        path: "Cargo.toml".into(),
+                        content: "[dependencies]\nanchor-lang = \"0.31\"".into(),
+                    },
+                    SourceFile {
+                        path: "programs/demo/src/lib.rs".into(),
+                        content: "#[program]\npub mod demo { pub fn initialize() {} }".into(),
+                    },
+                ]),
+            )
+            .unwrap();
+
+        assert_eq!(result.project_kind, ProjectKind::Anchor);
+        assert_eq!(result.metrics.instructions, 1);
+        assert!(result.profile.has_anchor_workspace);
     }
 }

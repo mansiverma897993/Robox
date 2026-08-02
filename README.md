@@ -1,16 +1,16 @@
 # Robox
 
-Robox is a Rust-native security analysis foundation for Solana and Anchor programs. It scans local projects, browser-uploaded source files, and public GitHub repositories; returns explainable findings with exact code locations; and exports terminal, JSON, Markdown, and SARIF 2.1.0 reports.
+Robox is a Rust-native security analysis foundation for Solana and Anchor programs. It scans local projects, browser-uploaded source files, and public GitHub repositories; returns explainable findings with exact code locations; and exports terminal, detailed PDF, JSON, Markdown, and SARIF 2.1.0 reports. The dashboard starts empty and never displays a score or finding until an imported project has completed a live scan.
 
-This repository is intentionally honest about scope. Version `0.1.0` implements syntax-aware project discovery with `syn`, six deterministic security rules, project metrics, a lightweight relationship graph, report generation, a CLI, and REST/WebSocket access. It does **not** claim compiler-quality CFG/DFG, symbolic execution, or AI reasoning. Those capabilities have documented extension seams.
+This repository is intentionally honest about scope. Version `0.1.0` implements Solana-aware project discovery with `syn`, Anchor/native-program classification, eleven deterministic security rules, Solana metrics, a lightweight instruction/account/PDA/CPI/token relationship graph, queued scan orchestration, report generation, a CLI, and REST/WebSocket access. It does **not** claim compiler-quality CFG/DFG, symbolic execution, runtime simulation, or AI reasoning. Those capabilities have documented extension seams.
 
 ## What is included
 
-- `robox-core`: source loading, Rust AST parsing, project metrics, relationship graph, rule registry, score calculation
-- `robox-report`: JSON, Markdown, and GitHub-compatible SARIF 2.1.0
+- `robox-core`: source loading, Rust AST parsing, Anchor/native Solana detection, project metrics, relationship graph, rule registry, score calculation
+- `robox-report`: detailed multi-page PDF, JSON, Markdown, and GitHub-compatible SARIF 2.1.0
 - `robox-cli`: local and CI-friendly scanning with score thresholds
-- `robox-api`: Axum REST API, WebSocket result stream, inline upload scanning, restricted public-GitHub cloning
-- `apps/web`: polished Next.js 16 dashboard with local file input, GitHub import, findings, remediation, graph, and report views
+- `robox-api`: Axum REST API, queued scans with progress, WebSocket stream, history, rule discovery, inline folder scanning, and restricted public-GitHub cloning
+- `apps/web`: polished Next.js 16 dashboard with folder/GitHub import, branch selection, live progress, reviewable findings, real graph data, backend reports, CI setup, and a custom-rule workspace
 - `examples/vulnerable-anchor`: safe local fixture containing five deliberate review findings
 - `.github/workflows/robox.yml`: SARIF CI example
 
@@ -34,7 +34,7 @@ cd /path/to/robooxx
 ./scripts/dev.sh
 ```
 
-Open `http://127.0.0.1:3000`. The Rust API listens on `http://127.0.0.1:8080`. Click **Run scan** for the bundled end-to-end demo, choose Rust/Cargo files for inline scanning, or enter a public `https://github.com/owner/repository` URL.
+Open `http://127.0.0.1:3000`. The Rust API listens on `http://127.0.0.1:8080`. Choose an Anchor/Rust project folder, or enter a public `https://github.com/owner/repository` URL and optional branch. Findings, metrics, graphs, and reports appear only after that live scan completes.
 
 ## CLI
 
@@ -43,6 +43,7 @@ cargo run -p robox-cli -- scan examples/vulnerable-anchor
 cargo run -p robox-cli -- scan path/to/anchor-project --format json --output report.json
 cargo run -p robox-cli -- scan path/to/anchor-project --format markdown --output report.md
 cargo run -p robox-cli -- scan path/to/anchor-project --format sarif --output report.sarif
+cargo run -p robox-cli -- scan path/to/anchor-project --format pdf --output audit.pdf
 cargo run -p robox-cli -- scan path/to/anchor-project --fail-on-score-below 70
 ```
 
@@ -53,11 +54,14 @@ Exit code `2` is used when `--fail-on-score-below` is configured and the score m
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
 | `GET` | `/health` | Service health |
-| `GET` | `/api/v1/demo` | Scan the bundled vulnerable fixture |
-| `POST` | `/api/v1/scans` | Scan a local path, inline files, or public GitHub repository |
+| `GET` | `/api/v1/rules` | List active rule metadata |
+| `GET` | `/api/v1/scans` | List completed scans for this process |
+| `POST` | `/api/v1/scans` | Run a synchronous local, inline, or GitHub scan |
 | `GET` | `/api/v1/scans/{id}` | Retrieve a completed scan |
-| `GET` | `/api/v1/scans/{id}/report/{json|sarif|markdown}` | Export a report |
-| `GET` | `/api/v1/ws/{id}` | Receive the current scan result over WebSocket |
+| `GET` | `/api/v1/scans/{id}/report/{pdf|json|sarif|markdown}` | Export a report |
+| `POST` | `/api/v1/jobs` | Start an asynchronous scan job |
+| `GET` | `/api/v1/jobs/{id}` | Read job stage, progress, error, or result |
+| `GET` | `/api/v1/ws/{job-id}` | Stream scan-job progress over WebSocket |
 
 Inline scan example:
 
@@ -81,7 +85,9 @@ GitHub input is restricted to canonical HTTPS repository URLs and shallow clones
 cargo fmt --all -- --check
 cargo test --workspace
 cd apps/web
+npm run lint
 npm run build
+npm run test:e2e
 ```
 
 The generated demo artifacts are in `reports/`. See [Architecture](docs/architecture.md) and [Rule authoring](docs/rules.md) for extension guidance.
@@ -91,4 +97,3 @@ The generated demo artifacts are in `reports/`. See [Architecture](docs/architec
 Robox findings are review candidates, not proof that a program is vulnerable or secure. Production hardening should add sandboxed repository isolation, authentication and authorization, durable scan storage, rate and size limits, signed plugin distribution, and independent manual audit coverage.
 
 Licensed under Apache-2.0.
-

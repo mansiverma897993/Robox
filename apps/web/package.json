@@ -10,6 +10,7 @@
     "build": "next build",
     "start": "next start -p 3000",
     "test": "npm run build",
+    "test:e2e": "playwright test",
     "lint": "eslint app --ignore-pattern .next"
   },
   "dependencies": {
@@ -18,6 +19,7 @@
     "react-dom": "19.2.6"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",

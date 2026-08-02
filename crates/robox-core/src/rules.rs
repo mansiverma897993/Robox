@@ -1,4 +1,5 @@
 use crate::{CodeLocation, Finding, Severity};
+use serde::Serialize;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -8,7 +9,7 @@ pub struct RuleContext<'a> {
     pub syntax: Option<&'a syn::File>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct RuleMetadata {
     pub id: &'static str,
     pub title: &'static str,
@@ -37,6 +38,11 @@ impl Default for RuleRegistry {
         registry.register(LineRule::unsafe_block());
         registry.register(FileRule::arbitrary_cpi());
         registry.register(FileRule::pda_without_bump());
+        registry.register(LineRule::timestamp_dependence());
+        registry.register(LineRule::direct_lamport_mutation());
+        registry.register(LineRule::lossy_numeric_cast());
+        registry.register(FileRule::unvalidated_token_account());
+        registry.register(FileRule::untyped_program_account());
         registry
     }
 }
@@ -56,6 +62,10 @@ impl RuleRegistry {
     }
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
+    }
+
+    pub fn metadata(&self) -> Vec<RuleMetadata> {
+        self.rules.iter().map(|rule| rule.metadata()).collect()
     }
 }
 
@@ -149,6 +159,72 @@ impl LineRule {
             attack: "Malformed input may reach undefined behavior if the unsafe invariant is incomplete.",
             remediation: "Replace with safe APIs or isolate the operation behind a reviewed, tested abstraction.",
             secure_example: "let bytes = account.try_borrow_data()?;",
+        }
+    }
+
+    fn timestamp_dependence() -> Self {
+        Self {
+            metadata: RuleMetadata {
+                id: "RBX007",
+                title: "Security decision depends on validator time",
+                severity: Severity::Medium,
+                confidence: 0.88,
+                cvss: 5.9,
+                cwe: "CWE-367",
+                category: "Solana sysvars",
+            },
+            predicate: |line| line.contains("unix_timestamp") || line.contains("Clock::get()"),
+            summary: "The instruction reads validator-controlled clock data in an execution path.",
+            root_cause: "Cluster time is approximate and can drift within the bounds allowed to validators.",
+            attack: "A boundary-sensitive check may be executed earlier or later than the business rule expects.",
+            remediation: "Use explicit tolerance windows and avoid exact-time equality or narrow expiry boundaries.",
+            secure_example: "require!(clock.unix_timestamp >= opens_at.saturating_sub(TOLERANCE), ErrorCode::NotOpen);",
+        }
+    }
+
+    fn direct_lamport_mutation() -> Self {
+        Self {
+            metadata: RuleMetadata {
+                id: "RBX008",
+                title: "Direct lamport mutation requires balance invariants",
+                severity: Severity::High,
+                confidence: 0.86,
+                cvss: 8.0,
+                cwe: "CWE-682",
+                category: "Lamport accounting",
+            },
+            predicate: |line| {
+                line.contains("lamports.borrow_mut") || line.contains("try_borrow_mut_lamports")
+            },
+            summary: "The program directly mutates account lamports outside a System Program transfer.",
+            root_cause: "Manual balance changes rely on the program preserving ownership, rent, and conservation invariants.",
+            attack: "An incorrect debit/credit pair can drain a program-owned account or create transaction failures.",
+            remediation: "Check ownership and rent constraints, use checked arithmetic, and assert conserved lamports.",
+            secure_example: "let next = source.lamports().checked_sub(amount).ok_or(ErrorCode::InsufficientFunds)?;",
+        }
+    }
+
+    fn lossy_numeric_cast() -> Self {
+        Self {
+            metadata: RuleMetadata {
+                id: "RBX009",
+                title: "Lossy numeric cast in on-chain arithmetic",
+                severity: Severity::Medium,
+                confidence: 0.74,
+                cvss: 5.5,
+                cwe: "CWE-681",
+                category: "Arithmetic",
+            },
+            predicate: |line| {
+                [" as u8", " as u16", " as u32", " as u64", " as usize"]
+                    .iter()
+                    .any(|cast| line.contains(cast))
+            },
+            summary: "A numeric value is converted with `as`, which may truncate or wrap without an error.",
+            root_cause: "Rust's primitive casts do not enforce the financial range invariant expected by the program.",
+            attack: "A large user-controlled amount can be narrowed into an unintended value used for accounting.",
+            remediation: "Use TryFrom/TryInto and return a typed program error when the value is out of range.",
+            secure_example: "let amount = u64::try_from(raw_amount).map_err(|_| ErrorCode::InvalidAmount)?;",
         }
     }
 }
@@ -253,6 +329,68 @@ impl FileRule {
             attack: "A non-canonical derived address may bypass assumptions made by downstream instructions.",
             remediation: "Add bump and, when appropriate, seeds::program to the account constraint.",
             secure_example: "#[account(seeds = [b\"vault\", authority.key().as_ref()], bump)]",
+        }
+    }
+
+    fn unvalidated_token_account() -> Self {
+        Self {
+            metadata: RuleMetadata {
+                id: "RBX010",
+                title: "SPL token account lacks mint or authority constraint",
+                severity: Severity::High,
+                confidence: 0.72,
+                cvss: 7.7,
+                cwe: "CWE-20",
+                category: "SPL Token validation",
+            },
+            predicate: |source| {
+                if source.contains("TokenAccount")
+                    && !source.contains("token::mint")
+                    && !source.contains("token::authority")
+                    && !source.contains("associated_token::")
+                {
+                    source
+                        .lines()
+                        .enumerate()
+                        .find(|(_, line)| line.contains("TokenAccount"))
+                        .map(|(index, line)| (index + 1, line))
+                } else {
+                    None
+                }
+            },
+            summary: "A typed token account is present without an evident mint or authority relationship constraint.",
+            root_cause: "Type checking alone proves SPL ownership, not that the account belongs to the expected mint or user.",
+            attack: "An attacker can substitute a valid token account for a different mint or authority.",
+            remediation: "Bind token accounts with token::mint/token::authority or associated_token constraints.",
+            secure_example: "#[account(token::mint = mint, token::authority = authority)]",
+        }
+    }
+
+    fn untyped_program_account() -> Self {
+        Self {
+            metadata: RuleMetadata {
+                id: "RBX011",
+                title: "External program is accepted as AccountInfo",
+                severity: Severity::High,
+                confidence: 0.83,
+                cvss: 8.2,
+                cwe: "CWE-829",
+                category: "Cross-program invocation",
+            },
+            predicate: |source| {
+                source
+                    .lines()
+                    .enumerate()
+                    .find(|(_, line)| {
+                        line.contains("program") && line.contains("AccountInfo<'info>")
+                    })
+                    .map(|(index, line)| (index + 1, line))
+            },
+            summary: "A CPI program account is untyped, so its executable identity is not declaratively pinned.",
+            root_cause: "AccountInfo does not prove that the supplied account is the intended external program.",
+            attack: "A caller can substitute another executable program and redirect a CPI.",
+            remediation: "Use Program<'info, T> or an address constraint against the trusted program ID.",
+            secure_example: "pub token_program: Program<'info, Token>,",
         }
     }
 }

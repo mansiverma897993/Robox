@@ -37,5 +37,4 @@ Rule quality requirements:
 - Tests for vulnerable, secure, malformed, and irrelevant fixtures.
 - No network access, secret access, or mutation of the scanned project.
 
-The six built-in MVP rules cover missing signer typing, unchecked accounts, potentially arbitrary CPI, panic paths, PDA bump omission, and unsafe blocks. Their pattern-based limitations are intentional and should be improved toward AST semantics before expanding breadth.
-
+The eleven built-in MVP rules cover missing signer typing, unchecked accounts, potentially arbitrary CPI, panic paths, PDA bump omission, unsafe blocks, timestamp dependence, direct lamport mutation, lossy numeric casts, weak token-account constraints, and untyped program accounts. Their pattern-based limitations are intentional and should be improved toward AST semantics before expanding breadth.

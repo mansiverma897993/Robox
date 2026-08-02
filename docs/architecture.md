@@ -8,8 +8,10 @@ flowchart LR
   B[Browser files] --> E
   C[Public GitHub repository] --> D[Validated shallow clone]
   D --> E
+  E --> Q[In-process scan job]
+  Q --> F
   E --> F[syn Rust AST]
-  F --> G[Project metrics and relationship model]
+  F --> G[Solana profile, metrics, and relationship model]
   F --> H[Rule registry]
   H --> I[Scored findings]
   G --> J[Scan result]
@@ -24,11 +26,11 @@ Security-critical analysis and orchestration are implemented in Rust. The web ap
 
 ## Crate boundaries
 
-`robox-core` owns stable domain types and deterministic analysis. `ScanEngine` accepts directory or inline sources, parses Rust files with `syn`, collects metrics and relationship nodes, runs a `RuleRegistry`, and computes a transparent score.
+`robox-core` owns stable domain types and deterministic analysis. `ScanEngine` accepts directory or inline sources, reads Rust and TOML manifests, classifies Anchor/native Solana/Rust projects, parses Rust with `syn`, collects Solana metrics and relationship nodes, runs a `RuleRegistry`, and computes a transparent score.
 
-`robox-report` is a pure projection layer. It accepts a `ScanResult` and cannot mutate or reclassify findings.
+`robox-report` is a pure projection layer. It accepts a `ScanResult` and cannot mutate or reclassify findings. Its PDF output contains four core audit sections and adds finding pages as needed so exact evidence and remediation are not truncated.
 
-`robox-api` owns transport concerns. GitHub cloning is constrained to public canonical HTTPS URLs. Completed scans use in-memory storage for the MVP.
+`robox-api` owns transport and orchestration concerns. GitHub cloning is constrained to public canonical HTTPS URLs. Jobs expose queued/scanning/completed/failed state over REST and WebSocket. Job and completed-scan storage is in-memory for the MVP.
 
 `robox-cli` is the CI surface. It supports machine-readable formats and an explicit score gate.
 
@@ -40,7 +42,7 @@ Security-critical analysis and orchestration are implemented in Rust. The web ap
 - **AI review:** use a provider adapter that receives evidence packages, never raw credentials. AI output should be separately attributed, confidence-scored, and prohibited from silently changing deterministic severity.
 - **Plugins:** the current registry is compile-time and memory-safe. A production plugin system should prefer WASI components with capability restrictions, versioned schemas, time/memory limits, and signed distribution over native dynamic libraries.
 - **Persistence:** replace the in-memory scan map with a repository trait backed by PostgreSQL or object storage.
-- **Queueing:** move clone and scan work to isolated workers and make POST `/scans` asynchronous for large repositories.
+- **Queueing:** replace the in-process `/jobs` worker with durable isolated workers for horizontal scale and stronger untrusted-repository isolation.
 
 ## Production hardening checklist
 
@@ -50,4 +52,3 @@ Security-critical analysis and orchestration are implemented in Rust. The web ap
 4. Pin and audit dependencies; sign release binaries and rule bundles.
 5. Store immutable scan inputs and detector versions for reproducible results.
 6. Add integration tests against representative Anchor versions and a labeled vulnerability corpus.
-

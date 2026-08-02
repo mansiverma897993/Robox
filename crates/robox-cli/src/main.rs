@@ -1,6 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use robox_core::{ScanEngine, ScanSource};
+use robox_core::{RuleRegistry, ScanEngine, ScanSource};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -31,14 +31,17 @@ enum Format {
     Json,
     Markdown,
     Sarif,
+    Pdf,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Rules => println!(
-            "RBX001 missing signer\nRBX002 unchecked account\nRBX003 arbitrary CPI\nRBX004 panic path\nRBX005 PDA bump\nRBX006 unsafe Rust"
-        ),
+        Command::Rules => {
+            for rule in RuleRegistry::default().metadata() {
+                println!("{} [{:<8}] {}", rule.id, rule.severity.label(), rule.title);
+            }
+        }
         Command::Scan {
             path,
             format,
@@ -52,17 +55,22 @@ fn main() -> Result<()> {
             let result = ScanEngine::default()
                 .scan(name, ScanSource::Directory(path.clone()))
                 .with_context(|| format!("unable to scan {}", path.display()))?;
+            let is_pdf = matches!(format, Format::Pdf);
             let report = match format {
-                Format::Terminal => terminal_report(&result),
-                Format::Json => robox_report::json_report(&result)?,
-                Format::Markdown => robox_report::markdown_report(&result),
-                Format::Sarif => robox_report::sarif_report(&result)?,
+                Format::Terminal => terminal_report(&result).into_bytes(),
+                Format::Json => robox_report::json_report(&result)?.into_bytes(),
+                Format::Markdown => robox_report::markdown_report(&result).into_bytes(),
+                Format::Sarif => robox_report::sarif_report(&result)?.into_bytes(),
+                Format::Pdf => robox_report::pdf_report(&result),
             };
             if let Some(output) = output {
                 std::fs::write(&output, report)
                     .with_context(|| format!("unable to write {}", output.display()))?;
             } else {
-                println!("{report}");
+                if is_pdf {
+                    bail!("PDF output requires --output <path>");
+                }
+                print!("{}", String::from_utf8(report)?);
             }
             if fail_on_score_below > 0 && result.security_score < fail_on_score_below {
                 std::process::exit(2);
@@ -74,8 +82,9 @@ fn main() -> Result<()> {
 
 fn terminal_report(result: &robox_core::ScanResult) -> String {
     let mut out = format!(
-        "Robox scan · {} · score {}/100 · {} findings\n",
+        "Robox scan | {} | {} | score {}/100 | {} findings\n",
         result.project,
+        result.project_kind.label(),
         result.security_score,
         result.findings.len()
     );

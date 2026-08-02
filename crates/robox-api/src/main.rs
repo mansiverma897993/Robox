@@ -2,7 +2,7 @@ use anyhow::Context;
 use axum::{
     Json, Router,
     extract::{
-        Path, State, WebSocketUpgrade,
+        DefaultBodyLimit, Path, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     http::{HeaderValue, StatusCode},
@@ -11,42 +11,65 @@ use axum::{
 };
 use clap::Parser;
 use futures_util::SinkExt;
-use robox_core::{ScanEngine, ScanResult, ScanSource, SourceFile};
-use serde::Deserialize;
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, process::Command, sync::Arc};
-use tokio::sync::RwLock;
+use robox_core::{RuleMetadata, RuleRegistry, ScanEngine, ScanResult, ScanSource, SourceFile};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    path::PathBuf,
+    process::Command,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
+use tokio::{sync::RwLock, time::Duration};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 #[derive(Parser)]
 struct Args {
     #[arg(long, env = "ROBOX_BIND", default_value = "127.0.0.1:8080")]
     bind: SocketAddr,
-    #[arg(
-        long,
-        env = "ROBOX_DEMO_PATH",
-        default_value = "examples/vulnerable-anchor"
-    )]
-    demo_path: PathBuf,
 }
 
 #[derive(Clone)]
 struct AppState {
     scans: Arc<RwLock<HashMap<String, ScanResult>>>,
-    demo_path: Arc<PathBuf>,
+    jobs: Arc<RwLock<HashMap<String, ScanJob>>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ScanRequest {
     project: String,
     source: SourceRequest,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SourceRequest {
     Path { path: PathBuf },
     Inline { files: Vec<SourceFile> },
     Github { url: String, branch: Option<String> },
+}
+
+#[derive(Clone, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum JobStatus {
+    Queued,
+    Scanning,
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Serialize)]
+struct ScanJob {
+    id: String,
+    project: String,
+    status: JobStatus,
+    stage: String,
+    progress: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scan: Option<ScanResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 #[tokio::main]
@@ -57,18 +80,21 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let state = AppState {
         scans: Arc::new(RwLock::new(HashMap::new())),
-        demo_path: Arc::new(args.demo_path),
+        jobs: Arc::new(RwLock::new(HashMap::new())),
     };
     let app = Router::new()
         .route(
             "/health",
             get(|| async { Json(serde_json::json!({ "status": "ok", "service": "robox-api" })) }),
         )
-        .route("/api/v1/demo", get(scan_demo))
-        .route("/api/v1/scans", post(create_scan))
+        .route("/api/v1/rules", get(list_rules))
+        .route("/api/v1/scans", get(list_scans).post(create_scan))
         .route("/api/v1/scans/{id}", get(get_scan))
         .route("/api/v1/scans/{id}/report/{format}", get(get_report))
+        .route("/api/v1/jobs", post(create_job))
+        .route("/api/v1/jobs/{id}", get(get_job))
         .route("/api/v1/ws/{id}", get(scan_socket))
+        .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -77,40 +103,101 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn scan_demo(State(state): State<AppState>) -> Result<Json<ScanResult>, ApiError> {
-    let result = ScanEngine::default().scan(
-        "sentinel-vault",
-        ScanSource::Directory((*state.demo_path).clone()),
-    )?;
-    state
-        .scans
-        .write()
-        .await
-        .insert(result.id.clone(), result.clone());
-    Ok(Json(result))
+async fn list_rules() -> Json<Vec<RuleMetadata>> {
+    Json(RuleRegistry::default().metadata())
+}
+
+async fn list_scans(State(state): State<AppState>) -> Json<Vec<ScanResult>> {
+    let mut scans: Vec<_> = state.scans.read().await.values().cloned().collect();
+    scans.sort_by(|left, right| right.completed_at.cmp(&left.completed_at));
+    Json(scans)
 }
 
 async fn create_scan(
     State(state): State<AppState>,
     Json(request): Json<ScanRequest>,
 ) -> Result<(StatusCode, Json<ScanResult>), ApiError> {
-    let result = match request.source {
-        SourceRequest::Path { path } => {
-            ScanEngine::default().scan(request.project, ScanSource::Directory(path))?
-        }
-        SourceRequest::Inline { files } => {
-            ScanEngine::default().scan(request.project, ScanSource::Inline(files))?
-        }
-        SourceRequest::Github { url, branch } => {
-            scan_github(&request.project, &url, branch.as_deref())?
-        }
-    };
-    state
-        .scans
-        .write()
+    validate_request(&request)?;
+    let result = tokio::task::spawn_blocking(move || perform_scan(request))
         .await
-        .insert(result.id.clone(), result.clone());
+        .map_err(|error| ApiError::internal(format!("scan worker failed: {error}")))??;
+    remember_scan(&state, &result).await;
     Ok((StatusCode::CREATED, Json(result)))
+}
+
+async fn create_job(
+    State(state): State<AppState>,
+    Json(request): Json<ScanRequest>,
+) -> Result<(StatusCode, Json<ScanJob>), ApiError> {
+    validate_request(&request)?;
+    let job = ScanJob {
+        id: new_job_id(),
+        project: request.project.clone(),
+        status: JobStatus::Queued,
+        stage: "Preparing project".into(),
+        progress: 5,
+        scan: None,
+        error: None,
+    };
+    state.jobs.write().await.insert(job.id.clone(), job.clone());
+
+    let worker_state = state.clone();
+    let job_id = job.id.clone();
+    tokio::spawn(async move {
+        update_job(
+            &worker_state,
+            &job_id,
+            JobStatus::Scanning,
+            "Loading source files",
+            20,
+        )
+        .await;
+        let scan = tokio::task::spawn_blocking(move || perform_scan(request)).await;
+        match scan {
+            Ok(Ok(result)) => {
+                update_job(
+                    &worker_state,
+                    &job_id,
+                    JobStatus::Scanning,
+                    "Generating findings and graph",
+                    85,
+                )
+                .await;
+                remember_scan(&worker_state, &result).await;
+                if let Some(job) = worker_state.jobs.write().await.get_mut(&job_id) {
+                    job.status = JobStatus::Completed;
+                    job.stage = "Audit complete".into();
+                    job.progress = 100;
+                    job.scan = Some(result);
+                }
+            }
+            Ok(Err(error)) => fail_job(&worker_state, &job_id, error.message).await,
+            Err(error) => {
+                fail_job(
+                    &worker_state,
+                    &job_id,
+                    format!("scan worker failed: {error}"),
+                )
+                .await
+            }
+        }
+    });
+
+    Ok((StatusCode::ACCEPTED, Json(job)))
+}
+
+async fn get_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ScanJob>, ApiError> {
+    state
+        .jobs
+        .read()
+        .await
+        .get(&id)
+        .cloned()
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("scan job not found"))
 }
 
 async fn get_scan(
@@ -138,19 +225,23 @@ async fn get_report(
         .get(&id)
         .cloned()
         .ok_or_else(|| ApiError::not_found("scan not found"))?;
-    let (content_type, body) = match format.as_str() {
-        "json" => ("application/json", robox_report::json_report(&result)?),
+    let (content_type, body): (&str, Vec<u8>) = match format.as_str() {
+        "pdf" => ("application/pdf", robox_report::pdf_report(&result)),
+        "json" => (
+            "application/json",
+            robox_report::json_report(&result)?.into_bytes(),
+        ),
         "sarif" => (
             "application/sarif+json",
-            robox_report::sarif_report(&result)?,
+            robox_report::sarif_report(&result)?.into_bytes(),
         ),
         "md" | "markdown" => (
             "text/markdown; charset=utf-8",
-            robox_report::markdown_report(&result),
+            robox_report::markdown_report(&result).into_bytes(),
         ),
         _ => {
             return Err(ApiError::bad_request(
-                "format must be json, sarif, or markdown",
+                "format must be pdf, json, sarif, or markdown",
             ));
         }
     };
@@ -173,27 +264,65 @@ async fn scan_socket(
 }
 
 async fn socket_session(mut socket: WebSocket, state: AppState, id: String) {
-    let payload = match state.scans.read().await.get(&id) {
-        Some(result) => serde_json::json!({ "event": "scan.completed", "scan": result }),
-        None => serde_json::json!({ "event": "scan.not_found", "scan_id": id }),
-    };
-    let _ = socket.send(Message::Text(payload.to_string().into())).await;
+    loop {
+        let job = state.jobs.read().await.get(&id).cloned();
+        let (payload, terminal) = if let Some(job) = job {
+            let terminal = matches!(job.status, JobStatus::Completed | JobStatus::Failed);
+            (
+                serde_json::json!({ "event": "scan.progress", "job": job }),
+                terminal,
+            )
+        } else if let Some(result) = state.scans.read().await.get(&id).cloned() {
+            (
+                serde_json::json!({ "event": "scan.completed", "scan": result }),
+                true,
+            )
+        } else {
+            (
+                serde_json::json!({ "event": "scan.not_found", "scan_id": id }),
+                true,
+            )
+        };
+        if socket
+            .send(Message::Text(payload.to_string().into()))
+            .await
+            .is_err()
+            || terminal
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(350)).await;
+    }
     let _ = socket.close().await;
+}
+
+fn perform_scan(request: ScanRequest) -> Result<ScanResult, ApiError> {
+    match request.source {
+        SourceRequest::Path { path } => {
+            Ok(ScanEngine::default().scan(request.project, ScanSource::Directory(path))?)
+        }
+        SourceRequest::Inline { files } => {
+            Ok(ScanEngine::default().scan(request.project, ScanSource::Inline(files))?)
+        }
+        SourceRequest::Github { url, branch } => {
+            scan_github(&request.project, &url, branch.as_deref())
+        }
+    }
 }
 
 fn scan_github(project: &str, url: &str, branch: Option<&str>) -> Result<ScanResult, ApiError> {
     validate_github_url(url)?;
     let temp = tempfile::tempdir().context("unable to allocate clone directory")?;
     let mut command = Command::new("git");
-    command.args(["clone", "--depth", "1"]);
-    if let Some(branch) = branch {
-        if branch.is_empty()
-            || !branch
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "-_/.".contains(c))
-        {
-            return Err(ApiError::bad_request("invalid branch name"));
-        }
+    command.args([
+        "clone",
+        "--depth",
+        "1",
+        "--single-branch",
+        "--filter=blob:none",
+    ]);
+    if let Some(branch) = branch.filter(|branch| !branch.trim().is_empty()) {
+        validate_branch(branch)?;
         command.args(["--branch", branch]);
     }
     let output = command
@@ -209,6 +338,40 @@ fn scan_github(project: &str, url: &str, branch: Option<&str>) -> Result<ScanRes
     Ok(ScanEngine::default().scan(project, ScanSource::Directory(temp.path().to_path_buf()))?)
 }
 
+fn validate_request(request: &ScanRequest) -> Result<(), ApiError> {
+    if request.project.trim().is_empty() || request.project.len() > 120 {
+        return Err(ApiError::bad_request(
+            "project name must be between 1 and 120 characters",
+        ));
+    }
+    if let SourceRequest::Inline { files } = &request.source {
+        if files.is_empty() {
+            return Err(ApiError::bad_request(
+                "select at least one Rust or manifest file",
+            ));
+        }
+        if files.len() > 2_000
+            || files.iter().map(|file| file.content.len()).sum::<usize>() > 12 * 1024 * 1024
+        {
+            return Err(ApiError::bad_request(
+                "project upload exceeds the 2,000 file or 12 MB limit",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_branch(branch: &str) -> Result<(), ApiError> {
+    if branch.len() > 200
+        || !branch.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '/' | '.')
+        })
+    {
+        return Err(ApiError::bad_request("invalid branch name"));
+    }
+    Ok(())
+}
+
 fn validate_github_url(url: &str) -> Result<(), ApiError> {
     let Some(path) = url.strip_prefix("https://github.com/") else {
         return Err(ApiError::bad_request(
@@ -221,7 +384,7 @@ fn validate_github_url(url: &str) -> Result<(), ApiError> {
             part.is_empty()
                 || !part
                     .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+                    .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
         })
     {
         return Err(ApiError::bad_request(
@@ -231,6 +394,39 @@ fn validate_github_url(url: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+async fn remember_scan(state: &AppState, result: &ScanResult) {
+    state
+        .scans
+        .write()
+        .await
+        .insert(result.id.clone(), result.clone());
+}
+
+async fn update_job(state: &AppState, id: &str, status: JobStatus, stage: &str, progress: u8) {
+    if let Some(job) = state.jobs.write().await.get_mut(id) {
+        job.status = status;
+        job.stage = stage.into();
+        job.progress = progress;
+    }
+}
+
+async fn fail_job(state: &AppState, id: &str, error: String) {
+    if let Some(job) = state.jobs.write().await.get_mut(id) {
+        job.status = JobStatus::Failed;
+        job.stage = "Audit failed".into();
+        job.error = Some(error);
+    }
+}
+
+fn new_job_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("job-{nanos:x}")
+}
+
+#[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     message: String,
@@ -249,30 +445,27 @@ impl ApiError {
             message: message.into(),
         }
     }
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
 }
 
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: error.to_string(),
-        }
+        Self::internal(error.to_string())
     }
 }
 impl From<robox_core::EngineError> for ApiError {
     fn from(error: robox_core::EngineError) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            message: error.to_string(),
-        }
+        Self::bad_request(error.to_string())
     }
 }
 impl From<serde_json::Error> for ApiError {
     fn from(error: serde_json::Error) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: error.to_string(),
-        }
+        Self::internal(error.to_string())
     }
 }
 
