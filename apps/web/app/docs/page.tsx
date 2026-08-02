@@ -71,7 +71,7 @@ export default function DocsPage() {
     <main className={styles.main}>
       <section className={styles.hero}>
         <div><span className={styles.heroTag}><i /> SOLANA SECURITY, EXPLAINED</span><h1>Build safer programs<br />with <em>evidence.</em></h1><p>The practical guide to auditing Anchor, native Solana, and Rust smart-contract projects with Robox.</p><div className={styles.heroActions}><a href="#quick-start">Start auditing <span>↓</span></a><a href="#architecture">Explore architecture</a></div></div>
-        <div className={styles.heroModel} aria-hidden="true"><span className={styles.modelCore}>R</span><i className={styles.ringOne} /><i className={styles.ringTwo} /><b className={styles.modelLabelOne}>AST</b><b className={styles.modelLabelTwo}>CPI</b><b className={styles.modelLabelThree}>PDA</b></div>
+        <div className={styles.heroModel} aria-hidden="true"><span className={styles.modelCore} /><i className={styles.ringOne} /><i className={styles.ringTwo} /><b className={styles.modelLabelOne}>AST</b><b className={styles.modelLabelTwo}>CPI</b><b className={styles.modelLabelThree}>PDA</b></div>
       </section>
 
       <div className={styles.statusStrip}><span><i className={styles.statusDot} /> Current foundation</span><b>Real source input</b><b>Rust-native engine</b><b>Explainable findings</b><b>4 report formats</b></div>

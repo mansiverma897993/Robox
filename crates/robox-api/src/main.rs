@@ -1,4 +1,7 @@
+mod audit_requests;
+
 use anyhow::Context;
+use audit_requests::{AuditRequestInput, AuditRequestReceipt, AuditRequestStore};
 use axum::{
     Json, Router,
     extract::{
@@ -28,12 +31,15 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 struct Args {
     #[arg(long, env = "ROBOX_BIND", default_value = "127.0.0.1:8080")]
     bind: SocketAddr,
+    #[arg(long, env = "ROBOX_DATABASE", default_value = "data/robox.sqlite3")]
+    database: PathBuf,
 }
 
 #[derive(Clone)]
 struct AppState {
     scans: Arc<RwLock<HashMap<String, ScanResult>>>,
     jobs: Arc<RwLock<HashMap<String, ScanJob>>>,
+    audit_requests: Arc<AuditRequestStore>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -78,9 +84,11 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let args = Args::parse();
+    let audit_requests = AuditRequestStore::initialize(&args.database)?;
     let state = AppState {
         scans: Arc::new(RwLock::new(HashMap::new())),
         jobs: Arc::new(RwLock::new(HashMap::new())),
+        audit_requests: Arc::new(audit_requests),
     };
     let app = Router::new()
         .route(
@@ -94,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/jobs", post(create_job))
         .route("/api/v1/jobs/{id}", get(get_job))
         .route("/api/v1/ws/{id}", get(scan_socket))
+        .route("/api/v1/audit-requests", post(create_audit_request))
         .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -105,6 +114,18 @@ async fn main() -> anyhow::Result<()> {
 
 async fn list_rules() -> Json<Vec<RuleMetadata>> {
     Json(RuleRegistry::default().metadata())
+}
+
+async fn create_audit_request(
+    State(state): State<AppState>,
+    Json(request): Json<AuditRequestInput>,
+) -> Result<(StatusCode, Json<AuditRequestReceipt>), ApiError> {
+    let request = request.normalize().map_err(ApiError::bad_request)?;
+    let store = state.audit_requests.clone();
+    let receipt = tokio::task::spawn_blocking(move || store.insert(request))
+        .await
+        .map_err(|error| ApiError::internal(format!("audit request worker failed: {error}")))??;
+    Ok((StatusCode::CREATED, Json(receipt)))
 }
 
 async fn list_scans(State(state): State<AppState>) -> Json<Vec<ScanResult>> {
