@@ -107,3 +107,24 @@ The generated demo artifacts are in `reports/`. See [Architecture](docs/architec
 Robox findings are review candidates, not proof that a program is vulnerable or secure. Production hardening should add sandboxed repository isolation, authentication and authorization, durable scan storage, rate and size limits, signed plugin distribution, and independent manual audit coverage.
 
 Licensed under Apache-2.0.
+
+---
+
+## Documentation
+
+Beyond this README, the repository ships in-depth guides for the pieces that matter most when you extend or deploy Robox:
+
+- **[Architecture](docs/architecture.md)** — current data flow (with a Mermaid diagram), crate boundaries for `robox-core`, `robox-report`, `robox-api`, and `robox-cli`, the documented extension seams (rules, compiler analysis, symbolic execution, AI review, plugins, persistence, queueing), and a production hardening checklist.
+- **[Rule authoring](docs/rules.md)** — how to implement a `Rule`, register it with the `RuleRegistry`, and ship a custom rule that runs deterministically and reports findings pinned to exact code locations.
+
+## About Robox
+
+Robox is a **Rust-native security auditor for Solana programs**, built to give auditors explainable, location-pinned findings instead of opaque scores. It works on Anchor and native Solana projects supplied from a local folder, browser-uploaded source files, or a public GitHub repository.
+
+Key ideas behind the project:
+
+- **Deterministic, reviewable rules.** The `0.1.0` release ships eleven security rules plus Solana-aware project discovery, metrics, and an instruction/account/PDA/CPI/token relationship graph. Findings are candidates for review, never proof of security.
+- **Honest scope.** Robox deliberately does not claim compiler-quality CFG/DFG, symbolic execution, runtime simulation, or AI reasoning. Those capabilities are left as documented extension seams so the foundation stays trustworthy.
+- **Multiple surfaces, one engine.** The same `robox-core` scan powers a Next.js web dashboard, a CI-friendly CLI with score thresholds, and a REST/WebSocket API, with reports exportable to terminal, PDF, JSON, Markdown, and SARIF 2.1.0.
+
+If you are planning to contribute rules, analysis backends, or production hardening, start with the two docs above — they capture the boundaries and extension points the codebase relies on.
