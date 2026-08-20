@@ -46,6 +46,15 @@ cd /path/to/robooxx
 
 Open `http://127.0.0.1:3000`. The Rust API listens on `http://127.0.0.1:8080`. Choose an Anchor/Rust project folder, or enter a public `https://github.com/owner/repository` URL and optional branch. Findings, metrics, graphs, and reports appear only after that live scan completes.
 
+## Deploy (one link: Vercel + Render)
+
+Host the Next.js dashboard on Vercel and the Rust API on Render, then share the single Vercel URL. The repo ships with `apps/web/vercel.json` and a `render.yaml` blueprint, so both deploys are mostly clicking:
+
+1. Render → New → Blueprint → pick this repo → Apply. Verify `https://<service>.onrender.com/health`.
+2. Vercel → Add New Project → import this repo → Root Directory `apps/web` → env var `NEXT_PUBLIC_ROBOX_API=https://<service>.onrender.com` → Deploy.
+
+Full walkthrough: [docs/deployment.md](docs/deployment.md).
+
 ## CLI
 
 ```powershell

@@ -1,0 +1,18 @@
+# Render Blueprint: deploys the Robox Rust API (robox-api) as a web service.
+# The Next.js dashboard is deployed separately on Vercel (see docs/deployment.md).
+services:
+  - type: web
+    name: robox-api
+    runtime: rust
+    plan: free
+    # Keep compiler memory low so the release build fits small instance sizes.
+    buildCommand: cargo build --release --bin robox-api --jobs 2
+    startCommand: ./target/release/robox-api --bind 0.0.0.0:$PORT
+    healthCheckPath: /health
+    envVars:
+      - key: RUST_LOG
+        value: info
+      - key: CARGO_PROFILE_RELEASE_LTO
+        value: "false"
+      - key: CARGO_PROFILE_RELEASE_CODEGEN_UNITS
+        value: "16"
