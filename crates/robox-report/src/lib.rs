@@ -1,5 +1,6 @@
 use robox_core::{ScanResult, Severity};
 use serde_json::{Value, json};
+use std::collections::HashSet;
 
 pub fn json_report(result: &ScanResult) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(result)
@@ -23,13 +24,14 @@ pub fn markdown_report(result: &ScanResult) -> String {
     output.push_str("## Findings\n\n");
     for finding in &result.findings {
         output.push_str(&format!(
-            "### {} - {}\n\n- Rule: `{}`\n- Confidence: {:.0}%\n- CVSS: {:.1}\n- CWE: {}\n- Location: `{}` line {}\n\n{}\n\n```rust\n{}\n```\n\n**Root cause.** {}\n\n**Attack scenario.** {}\n\n**Remediation.** {}\n\n```rust\n{}\n```\n\n",
+            "### {} - {}\n\n- Rule: `{}`\n- Confidence: {:.0}%\n- CVSS: {:.1}\n- CWE: {}\n- Sensitive asset: {}\n- Location: `{}` line {}\n\n{}\n\n```rust\n{}\n```\n\n**Root cause.** {}\n\n**Attack scenario.** {}\n\n**Remediation.** {}\n\n```rust\n{}\n```\n\n",
             finding.severity.label(),
             finding.title,
             finding.rule_id,
             finding.confidence * 100.0,
             finding.cvss,
             finding.cwe,
+            finding.sensitive_asset,
             finding.location.file,
             finding.location.line_start,
             finding.summary,
@@ -60,7 +62,8 @@ pub fn pdf_report(result: &ScanResult) -> Vec<u8> {
 }
 
 pub fn sarif_report(result: &ScanResult) -> Result<String, serde_json::Error> {
-    let rules: Vec<Value> = result.findings.iter().map(|finding| json!({ "id": finding.rule_id, "name": finding.title, "shortDescription": { "text": finding.summary }, "help": { "text": finding.remediation }, "properties": { "security-severity": finding.cvss.to_string(), "tags": [finding.cwe, finding.category] } })).collect();
+    let mut seen = HashSet::new();
+    let rules: Vec<Value> = result.findings.iter().filter(|finding| seen.insert(finding.rule_id.as_str())).map(|finding| json!({ "id": finding.rule_id, "name": finding.title, "shortDescription": { "text": finding.summary }, "help": { "text": finding.remediation }, "properties": { "security-severity": finding.cvss.to_string(), "tags": [finding.cwe, finding.category] } })).collect();
     let results: Vec<Value> = result.findings.iter().map(|finding| json!({
         "ruleId": finding.rule_id,
         "level": match finding.severity { Severity::Critical | Severity::High => "error", Severity::Medium => "warning", _ => "note" },
@@ -117,6 +120,7 @@ impl PdfPage {
         ));
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn wrapped(
         &mut self,
         x: f32,
@@ -384,7 +388,7 @@ fn finding_pages(result: &ScanResult) -> Vec<PdfPage> {
         page.wrapped(56.0, 624.0, 9.0, 92, 14.0, "F1", "The imported source did not match the active rule set. This result does not cover undiscovered business-logic flaws, economic attacks, runtime-only behavior, or vulnerabilities outside the imported files.");
     } else {
         for finding in &result.findings {
-            let estimated = 126.0
+            let estimated = 144.0
                 + wrap_text(&finding.summary, 88).len() as f32 * 11.0
                 + wrap_text(&finding.remediation, 88).len() as f32 * 11.0
                 + wrap_text(&finding.secure_example, 84).len() as f32 * 10.0;
@@ -428,6 +432,9 @@ fn finding_pages(result: &ScanResult) -> Vec<PdfPage> {
                 &format!("{}:{}", finding.location.file, finding.location.line_start),
             );
             y -= 15.0;
+            page.text(52.0, y, 7.5, "F2", "SENSITIVE ASSET");
+            y = page.wrapped(159.0, y, 8.0, 76, 11.0, "F1", &finding.sensitive_asset);
+            y -= 3.0;
             y = page.wrapped(
                 52.0,
                 y,
@@ -660,6 +667,30 @@ mod tests {
     #[test]
     fn sarif_has_expected_version() {
         assert!(sarif_report(&scan()).unwrap().contains("2.1.0"));
+    }
+
+    #[test]
+    fn sarif_deduplicates_rule_descriptors_for_multiple_findings() {
+        let result = ScanEngine::default()
+            .scan(
+                "two-panics",
+                ScanSource::Inline(vec![SourceFile {
+                    path: "lib.rs".into(),
+                    content:
+                        "fn test() {\n let a = Some(1).unwrap();\n let b = Some(2).unwrap();\n}"
+                            .into(),
+                }]),
+            )
+            .unwrap();
+        let sarif: Value = serde_json::from_str(&sarif_report(&result).unwrap()).unwrap();
+        assert_eq!(
+            sarif["runs"][0]["tool"]["driver"]["rules"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(sarif["runs"][0]["results"].as_array().unwrap().len(), 2);
     }
 
     #[test]

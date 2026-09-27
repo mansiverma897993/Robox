@@ -12,7 +12,7 @@ You can use it three ways: a web dashboard for interactive review, a CLI for loc
 
 Robox is a Rust-native security analysis foundation for Solana and Anchor programs. It scans local projects, browser-uploaded source files, and public GitHub repositories; returns explainable findings with exact code locations; and exports terminal, detailed PDF, JSON, Markdown, and SARIF 2.1.0 reports. The dashboard starts empty and never displays a score or finding until an imported project has completed a live scan.
 
-This repository is intentionally honest about scope. Version `0.1.0` implements Solana-aware project discovery with `syn`, Anchor/native-program classification, eleven deterministic security rules, Solana metrics, a lightweight instruction/account/PDA/CPI/token relationship graph, queued scan orchestration, report generation, a CLI, and REST/WebSocket access. It does **not** claim compiler-quality CFG/DFG, symbolic execution, runtime simulation, or AI reasoning. Those capabilities have documented extension seams.
+This repository is intentionally honest about scope. Version `0.1.0` implements Solana-aware project discovery with `syn`, Anchor/native-program classification, 22 deterministic security rules, Solana metrics, a lightweight instruction/account/PDA/CPI/token relationship graph, queued scan orchestration, report generation, a CLI, and REST/WebSocket access. It does **not** claim compiler-quality CFG/DFG, symbolic execution, runtime simulation, or AI reasoning. Those capabilities have documented extension seams.
 
 ## What is included
 
@@ -31,7 +31,7 @@ Requirements: Rust stable, Node.js 22+, npm, and Git.
 On Windows:
 
 ```powershell
-cd D:\robooxx
+cd D:\robox
 .\scripts\setup.ps1
 .\scripts\dev.ps1
 ```
@@ -39,7 +39,7 @@ cd D:\robooxx
 On macOS or Linux:
 
 ```bash
-cd /path/to/robooxx
+cd /path/to/robox
 ./scripts/setup.sh
 ./scripts/dev.sh
 ```
@@ -132,7 +132,7 @@ Robox is a **Rust-native security auditor for Solana programs**, built to give a
 
 Key ideas behind the project:
 
-- **Deterministic, reviewable rules.** The `0.1.0` release ships eleven security rules plus Solana-aware project discovery, metrics, and an instruction/account/PDA/CPI/token relationship graph. Findings are candidates for review, never proof of security.
+- **Deterministic, reviewable rules.** The `0.1.0` release ships 22 security rules plus Solana-aware project discovery, metrics, and an instruction/account/PDA/CPI/token relationship graph. Findings are candidates for review, never proof of security. See [benchmark results](docs/benchmark.md) for measured coverage and remaining limits.
 - **Honest scope.** Robox deliberately does not claim compiler-quality CFG/DFG, symbolic execution, runtime simulation, or AI reasoning. Those capabilities are left as documented extension seams so the foundation stays trustworthy.
 - **Multiple surfaces, one engine.** The same `robox-core` scan powers a Next.js web dashboard, a CI-friendly CLI with score thresholds, and a REST/WebSocket API, with reports exportable to terminal, PDF, JSON, Markdown, and SARIF 2.1.0.
 

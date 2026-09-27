@@ -1,10 +1,11 @@
 import { expect, test } from "@playwright/test";
+import path from "node:path";
 
 test("automation and custom-rule controls open working product views", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: /Audit Solana/i })).toBeVisible();
   await expect(page.getByRole("heading", { name: "No security result yet" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Project risk score" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Rule signal score" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Findings 0/i })).toBeDisabled();
 
   await page.getByRole("button", { name: /CI \/ CD/i }).click();
@@ -18,10 +19,11 @@ test("automation and custom-rule controls open working product views", async ({ 
 
 test("a real imported project produces findings, fixes, and a PDF download", async ({ page }) => {
   await page.goto("/");
-  await page.locator('input[type="file"]').setInputFiles("D:/robooxx/examples/vulnerable-anchor");
+  await page.locator('input[type="file"]').setInputFiles(path.resolve(process.cwd(), "../../examples/vulnerable-anchor"));
   await page.getByRole("button", { name: /Start security audit/i }).click();
-  await expect(page.getByRole("heading", { name: "Project risk score" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Rule signal score" })).toBeVisible({ timeout: 30_000 });
   await page.getByRole("button", { name: /Findings 5/i }).click();
+  await expect(page.getByText("SENSITIVE ASSET")).toBeVisible();
   await page.getByRole("button", { name: "Mark reviewed" }).click();
   await expect(page.getByRole("button", { name: /Reviewed/ })).toBeVisible();
   await page.getByRole("combobox").selectOption("high");
@@ -64,5 +66,5 @@ test("API recognizes an uploaded Anchor project as a Solana program", async ({ r
 
   const rules = await request.get("http://127.0.0.1:8080/api/v1/rules");
   expect(rules.ok()).toBeTruthy();
-  expect((await rules.json()).length).toBe(11);
+  expect((await rules.json()).length).toBe(22);
 });

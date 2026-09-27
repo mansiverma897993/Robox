@@ -10,6 +10,8 @@ services:
     startCommand: ./target/release/robox-api --bind 0.0.0.0:$PORT
     healthCheckPath: /health
     envVars:
+      - key: ROBOX_ADMIN_TOKEN
+        generateValue: true
       - key: RUST_LOG
         value: info
       - key: CARGO_PROFILE_RELEASE_LTO

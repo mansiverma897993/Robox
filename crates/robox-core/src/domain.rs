@@ -92,6 +92,8 @@ pub struct Finding {
     pub cvss: f32,
     pub cwe: String,
     pub category: String,
+    #[serde(default)]
+    pub sensitive_asset: String,
     pub location: CodeLocation,
     pub summary: String,
     pub root_cause: String,

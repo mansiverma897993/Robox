@@ -18,7 +18,7 @@ const rules = [
   ["RBX001", "Missing signer typing", "Identifies authority-shaped accounts that are not enforced as signers."],
   ["RBX002", "Unchecked account substitution", "Flags unchecked accounts crossing security-sensitive instruction boundaries."],
   ["RBX003", "Attacker-controlled CPI", "Finds cross-program invocations where the target program may not be constrained."],
-  ["RBX004", "Panic-prone execution", "Surfaces unwrap, expect, panic, and assert paths that can abort on-chain execution."],
+  ["RBX004", "Panic-prone execution", "Surfaces unwrap and expect paths that can abort instruction execution."],
   ["RBX005", "Non-canonical PDA bump", "Checks PDA constraints for canonical bump handling."],
   ["RBX006", "Unsafe Rust on-chain", "Highlights unsafe blocks in program code for focused manual review."],
   ["RBX007", "Timestamp dependence", "Finds clock-dependent authorization or value logic that needs tolerance analysis."],
@@ -26,6 +26,17 @@ const rules = [
   ["RBX009", "Lossy numeric cast", "Flags narrowing `as` conversions that may truncate amounts or counters."],
   ["RBX010", "Token account constraints", "Checks SPL token account declarations for mint and authority constraints."],
   ["RBX011", "External program as AccountInfo", "Finds external programs modeled without executable/program identity validation."],
+  ["RBX012", "Wrapping arithmetic", "Reviews overflow-prone arithmetic on values that may control balances or limits."],
+  ["RBX013", "Unchecked deserialization", "Flags account bytes decoded without normal type or discriminator checks."],
+  ["RBX014", "Raw token authority", "Looks for decoded token data without a binding to the expected authority."],
+  ["RBX015", "Token Program owner", "Checks raw token account decoding for program ownership validation."],
+  ["RBX016", "Sysvar identity", "Reviews untyped sysvar accounts without a pinned address."],
+  ["RBX017", "Canonical PDA bump", "Finds create_program_address paths without an evident canonical bump comparison."],
+  ["RBX018", "Mutable account aliasing", "Reviews two writable roles that may accept the same account."],
+  ["RBX019", "State type discriminator", "Looks for raw state decoding without an account type check."],
+  ["RBX020", "Reinitialization", "Reviews initialize paths that may rewrite an existing authority."],
+  ["RBX021", "Manual account close", "Looks for lamport drains without closed-account marking."],
+  ["RBX022", "PDA signer sharing", "Reviews mint-wide signing authority for token withdrawal destinations."],
 ];
 
 function Code({ title, children }: { title: string; children: string }) {
@@ -97,7 +108,8 @@ export default function DocsPage() {
       </DocSection>
 
       <DocSection id="coverage" eyebrow="ANALYSIS" title="Detection coverage">
-        <p>Version 0.1.0 ships eleven deterministic checks. The catalog is returned live by <code>GET /api/v1/rules</code>, so the UI and integrations can display the active engine rather than hard-coded demo results.</p>
+        <p>Version 0.1.0 ships 22 deterministic checks. The catalog is returned live by <code>GET /api/v1/rules</code>, so the UI and integrations can display the active engine rather than hard-coded demo results.</p>
+        <p>These checks were exercised against Anchor&apos;s paired exploit examples. Read the <a href="https://github.com/mansiverma897993/Robox/blob/main/docs/benchmark.md" target="_blank" rel="noreferrer">benchmark and its limits ↗</a> before interpreting a clean scan as assurance.</p>
         <div className={styles.ruleTable}>{rules.map(([id, title, description]) => <article key={id}><code>{id}</code><div><h3>{title}</h3><p>{description}</p></div><span>ACTIVE</span></article>)}</div>
       </DocSection>
 
@@ -124,7 +136,7 @@ export default function DocsPage() {
       </DocSection>
 
       <DocSection id="rest-api" eyebrow="INTEGRATION" title="REST API reference">
-        <p>The local API listens on <code>http://127.0.0.1:8080</code> by default. Scan creation accepts local paths for trusted local callers, inline source from the browser, or restricted public GitHub sources.</p>
+        <p>The local API listens on <code>http://127.0.0.1:8080</code> by default. Scan creation accepts inline source from the browser or restricted public GitHub sources. Server-side filesystem paths require the explicit <code>ROBOX_ALLOW_PATH_SCAN=1</code> setting.</p>
         <div className={styles.apiTable}><div><b>GET</b><code>/health</code><span>Service and engine health</span></div><div><b>GET</b><code>/api/v1/rules</code><span>Active rule metadata</span></div><div><b>GET</b><code>/api/v1/scans</code><span>Completed scans in this process</span></div><div><b className={styles.post}>POST</b><code>/api/v1/scans</code><span>Run a synchronous scan</span></div><div><b>GET</b><code>/api/v1/scans/{`{id}`}</code><span>Retrieve one completed scan</span></div><div><b>GET</b><code>/api/v1/scans/{`{id}`}/report/{`{format}`}</code><span>PDF, JSON, SARIF, or Markdown</span></div><div><b className={styles.post}>POST</b><code>/api/v1/jobs</code><span>Start an asynchronous scan</span></div><div><b>GET</b><code>/api/v1/jobs/{`{id}`}</code><span>Read progress or result</span></div><div><b>GET</b><code>/api/v1/ws/{`{job-id}`}</code><span>Upgrade to progress WebSocket</span></div></div>
         <Code title="Create an inline scan job">{`curl -X POST http://127.0.0.1:8080/api/v1/jobs \\\n  -H "content-type: application/json" \\\n  -d '{\n    "project": "my-program",\n    "source": {\n      "type": "inline",\n      "files": [{"path":"src/lib.rs","content":"..."}]\n    }\n  }'`}</Code>
       </DocSection>

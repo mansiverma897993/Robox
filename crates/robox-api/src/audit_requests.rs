@@ -40,6 +40,21 @@ pub struct AuditRequestReceipt {
     pub message: &'static str,
 }
 
+#[derive(Debug, Serialize)]
+pub struct AuditRequestRecord {
+    pub id: String,
+    pub project_name: String,
+    pub website_url: Option<String>,
+    pub repository_url: String,
+    pub chains: Vec<String>,
+    pub prior_review: String,
+    pub scope: String,
+    pub email: String,
+    pub telegram: Option<String>,
+    pub status: String,
+    pub received_at: String,
+}
+
 impl AuditRequestStore {
     pub fn initialize(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
@@ -91,6 +106,40 @@ impl AuditRequestStore {
             received_at,
             message: "Your project was submitted securely. The Robox team will contact you using the details provided.",
         })
+    }
+
+    pub fn list(&self, limit: usize, offset: usize) -> Result<Vec<AuditRequestRecord>> {
+        let connection = open_connection(self.path.as_ref())?;
+        let mut statement = connection.prepare(
+            "SELECT id, project_name, website_url, repository_url, chains_json,
+                    prior_review, scope, email, telegram, status, created_at
+             FROM audit_requests ORDER BY created_at DESC, id DESC LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = statement.query_map([limit.min(100) as i64, offset as i64], |row| {
+            let chains_json: String = row.get(4)?;
+            let chains = serde_json::from_str(&chains_json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            Ok(AuditRequestRecord {
+                id: row.get(0)?,
+                project_name: row.get(1)?,
+                website_url: row.get(2)?,
+                repository_url: row.get(3)?,
+                chains,
+                prior_review: row.get(5)?,
+                scope: row.get(6)?,
+                email: row.get(7)?,
+                telegram: row.get(8)?,
+                status: row.get(9)?,
+                received_at: row.get(10)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("unable to read audit requests")
     }
 }
 
@@ -262,5 +311,9 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM audit_requests", [], |row| row.get(0))
             .expect("count requests");
         assert_eq!(count, 1);
+        let records = store.list(10, 0).expect("list requests");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].email, "security@example.com");
+        assert_eq!(records[0].telegram.as_deref(), Some("@security-team"));
     }
 }

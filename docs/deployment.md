@@ -12,7 +12,7 @@ Users only ever open the **Vercel link**. The dashboard calls the Render API in 
 The repo is already deployment-ready:
 
 - The frontend reads the API base URL from `NEXT_PUBLIC_ROBOX_API` (`apps/web/app/page.tsx`, `apps/web/app/submit/page.tsx`).
-- The API binds to the address in `ROBOX_BIND` (CLI flag `--bind`, see `crates/robox-api/src/main.rs`) and enables permissive CORS, so a cross-origin dashboard works out of the box.
+- The API binds to the address in `ROBOX_BIND` (CLI flag `--bind`, see `crates/robox-api/src/main.rs`). Set `ROBOX_ALLOWED_ORIGIN` to your exact Vercel origin after deployment to restrict browser requests.
 - `apps/web/vercel.json` pins the Vercel build settings.
 - `render.yaml` (repo root) is a Render Blueprint that builds and starts the API with a `/health` health check.
 
@@ -29,6 +29,18 @@ The repo is already deployment-ready:
    `https://<your-service>.onrender.com/health` must return `{"status":"ok","service":"robox-api"}`.
 4. Copy that base URL (no trailing slash) — you need it in Step 2.
 
+The Blueprint generates `ROBOX_ADMIN_TOKEN`. Keep that value private. The protected `GET /api/v1/admin/audit-requests` endpoint returns at most 100 recent submissions when called with `Authorization: Bearer <token>`. It returns no data without the token.
+
+To read requests from PowerShell, copy the token from your Render service's Environment page and run:
+
+```powershell
+$roboxAdminToken = Read-Host "Robox admin token"
+$roboxApiUrl = "https://<your-service>.onrender.com"
+Invoke-RestMethod -Uri "$roboxApiUrl/api/v1/admin/audit-requests?limit=50&offset=0" -Headers @{ Authorization = "Bearer $roboxAdminToken" }
+```
+
+Increase `offset` by 50 for the next page. Keep exported contact information private.
+
 Manual alternative (no blueprint): **New → Web Service**, runtime **Rust**, same build/start commands, health check path `/health`.
 
 ## Step 2 — Deploy the dashboard on Vercel
@@ -42,6 +54,8 @@ Manual alternative (no blueprint): **New → Web Service**, runtime **Rust**, sa
 4. **Environment Variables** (add for Production and Preview):
    - `NEXT_PUBLIC_ROBOX_API` = `https://<your-service>.onrender.com` ← the Render URL from Step 1, **no trailing slash**
 5. **Deploy**.
+
+After the Vercel URL is known, set `ROBOX_ALLOWED_ORIGIN` on Render to the exact origin, such as `https://robox-web.vercel.app`, and redeploy the API.
 
 > `NEXT_PUBLIC_*` variables are inlined at build time. If you change the API URL later, you must **redeploy** the Vercel project for the change to take effect.
 
@@ -66,6 +80,8 @@ Share the Vercel URL — that single link is the whole product.
 
 ## Operational notes
 
-- Scan history and job state live in process memory; audit requests live in a SQLite file on the instance. Both are **ephemeral** — a restart, redeploy, or free-tier sleep clears them. Fine for demos; add a Render disk or external database for durability.
-- CORS is currently permissive. For production, restrict `CorsLayer` in `crates/robox-api/src/main.rs` to your Vercel domain.
+- Scan history and job state live in process memory and disappear after a restart. Audit requests live in SQLite. The default free Render instance has an ephemeral filesystem, so **real submitted contact data can disappear after redeploy or restart**. Do not rely on the free configuration to collect customer leads. Before accepting real submissions, move the service to a paid plan with a persistent disk mounted at `/var/data` and set `ROBOX_DATABASE=/var/data/robox.sqlite3`, or use a durable database integration.
+- The paid persistent disk is a billing decision and is not enabled by this repository. [Render's disk documentation](https://render.com/docs/disks) describes current plan and backup constraints.
+- `ROBOX_ALLOWED_ORIGIN` restricts browser access, but it is not authentication. The anonymous scan and intake endpoints still need external abuse protection such as request rate limiting at the edge for a public launch.
+- API path scans are disabled by default. Set `ROBOX_ALLOW_PATH_SCAN=1` only for a trusted local API; never set it on the public Render service.
 - Local development is unchanged: `scripts/dev.ps1` (Windows) or `scripts/dev.sh` (macOS/Linux) still runs both processes locally.

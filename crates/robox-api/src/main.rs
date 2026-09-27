@@ -1,14 +1,16 @@
 mod audit_requests;
 
 use anyhow::Context;
-use audit_requests::{AuditRequestInput, AuditRequestReceipt, AuditRequestStore};
+use audit_requests::{
+    AuditRequestInput, AuditRequestReceipt, AuditRequestRecord, AuditRequestStore,
+};
 use axum::{
     Json, Router,
     extract::{
-        DefaultBodyLimit, Path, State, WebSocketUpgrade,
+        DefaultBodyLimit, Path, Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::{HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -20,11 +22,14 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     path::PathBuf,
-    process::Command,
+    process::{Command, Stdio},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::{sync::RwLock, time::Duration};
+use tokio::{
+    sync::{RwLock, Semaphore},
+    time::Duration,
+};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 #[derive(Parser)]
@@ -40,6 +45,8 @@ struct AppState {
     scans: Arc<RwLock<HashMap<String, ScanResult>>>,
     jobs: Arc<RwLock<HashMap<String, ScanJob>>>,
     audit_requests: Arc<AuditRequestStore>,
+    admin_token: Option<Arc<String>>,
+    scan_slots: Arc<Semaphore>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -78,6 +85,12 @@ struct ScanJob {
     error: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct AuditRequestListQuery {
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -89,8 +102,22 @@ async fn main() -> anyhow::Result<()> {
         scans: Arc::new(RwLock::new(HashMap::new())),
         jobs: Arc::new(RwLock::new(HashMap::new())),
         audit_requests: Arc::new(audit_requests),
+        admin_token: std::env::var("ROBOX_ADMIN_TOKEN")
+            .ok()
+            .filter(|token| token.len() >= 32)
+            .map(Arc::new),
+        scan_slots: Arc::new(Semaphore::new(2)),
+    };
+    let cors = if let Ok(origin) = std::env::var("ROBOX_ALLOWED_ORIGIN") {
+        CorsLayer::new()
+            .allow_origin(HeaderValue::from_str(&origin).context("invalid ROBOX_ALLOWED_ORIGIN")?)
+            .allow_methods([Method::GET, Method::POST])
+            .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+    } else {
+        CorsLayer::permissive()
     };
     let app = Router::new()
+        .route("/", get(api_index))
         .route(
             "/health",
             get(|| async { Json(serde_json::json!({ "status": "ok", "service": "robox-api" })) }),
@@ -102,14 +129,38 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/jobs", post(create_job))
         .route("/api/v1/jobs/{id}", get(get_job))
         .route("/api/v1/ws/{id}", get(scan_socket))
-        .route("/api/v1/audit-requests", post(create_audit_request))
+        .route(
+            "/api/v1/audit-requests",
+            post(create_audit_request).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route("/api/v1/admin/audit-requests", get(list_audit_requests))
         .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
     tracing::info!(address = %args.bind, "Robox API listening");
     axum::serve(tokio::net::TcpListener::bind(args.bind).await?, app).await?;
     Ok(())
+}
+
+async fn api_index() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "service": "robox-api",
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+        "documentation": "https://github.com/mansiverma897993/Robox/tree/main/docs",
+        "health": "/health",
+        "endpoints": {
+            "rules": "GET /api/v1/rules",
+            "scans": "GET|POST /api/v1/scans",
+            "scan": "GET /api/v1/scans/{id}",
+            "reports": "GET /api/v1/scans/{id}/report/{format}",
+            "jobs": "POST /api/v1/jobs",
+            "job": "GET /api/v1/jobs/{id}",
+            "progress": "WS /api/v1/ws/{id}",
+            "audit_requests": "POST /api/v1/audit-requests"
+        }
+    }))
 }
 
 async fn list_rules() -> Json<Vec<RuleMetadata>> {
@@ -128,9 +179,52 @@ async fn create_audit_request(
     Ok((StatusCode::CREATED, Json(receipt)))
 }
 
+async fn list_audit_requests(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<AuditRequestListQuery>,
+) -> Result<Response, ApiError> {
+    let token = state
+        .admin_token
+        .as_deref()
+        .ok_or_else(|| ApiError::not_found("not found"))?;
+    let supplied = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    if !constant_time_equal(supplied.as_bytes(), token.as_bytes()) {
+        return Err(ApiError::unauthorized());
+    }
+    let store = state.audit_requests.clone();
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
+    let offset = query.offset.unwrap_or(0).min(1_000_000);
+    let records: Vec<AuditRequestRecord> =
+        tokio::task::spawn_blocking(move || store.list(limit, offset))
+            .await
+            .map_err(|error| {
+                ApiError::internal(format!("audit request worker failed: {error}"))
+            })??;
+    Ok((
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        Json(records),
+    )
+        .into_response())
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |diff, (a, b)| diff | (a ^ b))
+        == 0
+}
+
 async fn list_scans(State(state): State<AppState>) -> Json<Vec<ScanResult>> {
     let mut scans: Vec<_> = state.scans.read().await.values().cloned().collect();
-    scans.sort_by(|left, right| right.completed_at.cmp(&left.completed_at));
+    scans.sort_by_key(|scan| std::cmp::Reverse(scan.completed_at));
     Json(scans)
 }
 
@@ -139,9 +233,17 @@ async fn create_scan(
     Json(request): Json<ScanRequest>,
 ) -> Result<(StatusCode, Json<ScanResult>), ApiError> {
     validate_request(&request)?;
-    let result = tokio::task::spawn_blocking(move || perform_scan(request))
-        .await
-        .map_err(|error| ApiError::internal(format!("scan worker failed: {error}")))??;
+    let slot = state
+        .scan_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::busy())?;
+    let result = tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        perform_scan(request)
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("scan worker failed: {error}")))??;
     remember_scan(&state, &result).await;
     Ok((StatusCode::CREATED, Json(result)))
 }
@@ -151,6 +253,11 @@ async fn create_job(
     Json(request): Json<ScanRequest>,
 ) -> Result<(StatusCode, Json<ScanJob>), ApiError> {
     validate_request(&request)?;
+    let slot = state
+        .scan_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::busy())?;
     let job = ScanJob {
         id: new_job_id(),
         project: request.project.clone(),
@@ -160,11 +267,27 @@ async fn create_job(
         scan: None,
         error: None,
     };
-    state.jobs.write().await.insert(job.id.clone(), job.clone());
+    {
+        let mut jobs = state.jobs.write().await;
+        if jobs.len() >= 100 {
+            let oldest = jobs
+                .iter()
+                .filter(|(_, item)| matches!(item.status, JobStatus::Completed | JobStatus::Failed))
+                .map(|(id, _)| id.clone())
+                .min();
+            if let Some(id) = oldest {
+                jobs.remove(&id);
+            } else {
+                return Err(ApiError::busy());
+            }
+        }
+        jobs.insert(job.id.clone(), job.clone());
+    }
 
     let worker_state = state.clone();
     let job_id = job.id.clone();
     tokio::spawn(async move {
+        let _slot = slot;
         update_job(
             &worker_state,
             &job_id,
@@ -346,15 +469,33 @@ fn scan_github(project: &str, url: &str, branch: Option<&str>) -> Result<ScanRes
         validate_branch(branch)?;
         command.args(["--branch", branch]);
     }
-    let output = command
+    let mut child = command
         .arg(url)
         .arg(temp.path())
-        .output()
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
         .context("unable to execute git")?;
-    if !output.status.success() {
-        return Err(ApiError::bad_request(
-            "GitHub clone failed; verify the public repository URL and branch",
-        ));
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().context("unable to wait for git clone")? {
+            if !status.success() {
+                return Err(ApiError::bad_request(
+                    "GitHub clone failed; verify the public repository URL and branch",
+                ));
+            }
+            break;
+        }
+        if started.elapsed() > std::time::Duration::from_secs(60) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ApiError::bad_request(
+                "GitHub clone exceeded the 60 second limit",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
     Ok(ScanEngine::default().scan(project, ScanSource::Directory(temp.path().to_path_buf()))?)
 }
@@ -363,6 +504,13 @@ fn validate_request(request: &ScanRequest) -> Result<(), ApiError> {
     if request.project.trim().is_empty() || request.project.len() > 120 {
         return Err(ApiError::bad_request(
             "project name must be between 1 and 120 characters",
+        ));
+    }
+    if matches!(&request.source, SourceRequest::Path { .. })
+        && std::env::var("ROBOX_ALLOW_PATH_SCAN").as_deref() != Ok("1")
+    {
+        return Err(ApiError::bad_request(
+            "server-side path scans are disabled; upload source files or use a public GitHub URL",
         ));
     }
     if let SourceRequest::Inline { files } = &request.source {
@@ -416,11 +564,16 @@ fn validate_github_url(url: &str) -> Result<(), ApiError> {
 }
 
 async fn remember_scan(state: &AppState, result: &ScanResult) {
-    state
-        .scans
-        .write()
-        .await
-        .insert(result.id.clone(), result.clone());
+    let mut scans = state.scans.write().await;
+    if scans.len() >= 100
+        && let Some(id) = scans
+            .iter()
+            .min_by_key(|(_, scan)| scan.completed_at)
+            .map(|(id, _)| id.clone())
+    {
+        scans.remove(&id);
+    }
+    scans.insert(result.id.clone(), result.clone());
 }
 
 async fn update_job(state: &AppState, id: &str, status: JobStatus, stage: &str, progress: u8) {
@@ -454,6 +607,18 @@ struct ApiError {
 }
 
 impl ApiError {
+    fn unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: "invalid admin token".into(),
+        }
+    }
+    fn busy() -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "scan capacity is full; retry when a current scan finishes".into(),
+        }
+    }
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,

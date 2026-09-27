@@ -37,4 +37,4 @@ Rule quality requirements:
 - Tests for vulnerable, secure, malformed, and irrelevant fixtures.
 - No network access, secret access, or mutation of the scanned project.
 
-The eleven built-in MVP rules cover missing signer typing, unchecked accounts, potentially arbitrary CPI, panic paths, PDA bump omission, unsafe blocks, timestamp dependence, direct lamport mutation, lossy numeric casts, weak token-account constraints, and untyped program accounts. Their pattern-based limitations are intentional and should be improved toward AST semantics before expanding breadth.
+The 22 built-in rules cover signer authorization, account identity, CPI targets, panic paths, PDA bump handling, unsafe blocks, time gates, lamport accounting, numeric casts, SPL Token owner and authority relationships, sysvar identity, duplicate mutable accounts, type discrimination, reinitialization, manual close, and PDA signer sharing. Account checks are scoped to each Anchor field and its own constraints; findings remain review candidates because handler checks and business logic need human verification. See [the benchmark](benchmark.md) for paired insecure and repaired examples.
