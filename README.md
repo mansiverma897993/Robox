@@ -22,7 +22,7 @@ This repository is intentionally honest about scope. Version `0.1.0` implements 
 - `robox-api`: Axum REST API, queued scans with progress, WebSocket stream, history, rule discovery, inline folder scanning, and restricted public-GitHub cloning
 - `apps/web`: polished Next.js 16 dashboard with folder/GitHub import, branch selection, live progress, reviewable findings, real graph data, backend reports, CI setup, and a custom-rule workspace
 - `examples/vulnerable-anchor`: safe local fixture containing five deliberate review findings
-- `.github/workflows/robox.yml`: SARIF CI example
+- `.github/workflows/robox.yml`: Rust and web checks plus a SARIF regression scan of the deliberately vulnerable fixture
 
 ## Quick start
 
